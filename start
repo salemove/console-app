@@ -1,0 +1,3 @@
+#!/bin/bash
+
+bundle exec rackup -q -p 7676 config.ru
