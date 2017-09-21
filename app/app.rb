@@ -38,7 +38,7 @@ class App
       return
     end
 
-    server = DEV_LEGACY_API if @server == DEV_ENGAGEMENT_API
+    server = @server == DEV_ENGAGEMENT_API ? DEV_LEGACY_API : @server
     response = HTTParty.get("https://#{server}/operators?include_offline=false&site_ids[]=#{@site_id}", {
       headers: {
         'Authorization' => "Token #{@dev_token}",
