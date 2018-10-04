@@ -1,21 +1,21 @@
 require 'tty/prompt'
 require 'httparty'
+HTTParty::Basement.default_options.update(verify: false)
 require 'securerandom'
 require_relative './logger'
 require_relative './engagement'
 require_relative './gui'
 
 class App
-  DEV_ENGAGEMENT_API = 'engagement.local.dev'
-  DEV_LEGACY_API = 'api.local.dev'
+  USER_AGENT = 'SaleMove Console App'.freeze
 
-  API_LOCATIONS = [
-    DEV_ENGAGEMENT_API,
-    'api.at.samo.io',
-    'api.beta.salemove.com',
-    'api.salemove.com',
-    'api.salemove.eu'
-  ].freeze
+  ENVIRONMENTS = {
+    'Local' => { engagement_api: 'engagement.local.dev', api: 'api.local.dev' },
+    'Acceptance' => { engagement_api: 'api.at.samo.io', api: 'api.at.samo.io' },
+    'Beta' => { engagement_api: 'api.beta.salemove.com', api: 'api.beta.salemove.com' },
+    'Prod US' => { engagement_api: 'api.salemove.com', api: 'api.salemove.com' },
+    'Prod EU' => { engagement_api: 'api.salemove.eu', api: 'api.salemove.eu' }
+  }
 
   def initialize(incoming_url)
     @incoming_url = incoming_url
@@ -23,50 +23,53 @@ class App
   end
 
   def run
-    @server = @prompt.select('SaleMove API location?', API_LOCATIONS)
+    env = @prompt.select('SaleMove API location?', ENVIRONMENTS.keys)
+    @api_url = ENVIRONMENTS[env].fetch(:api)
+    @engagement_api_url = ENVIRONMENTS[env].fetch(:engagement_api)
     @site_id = ENV['SITE_ID'] || @prompt.ask('Site ID?')
-    @dev_token = ENV['DEV_TOKEN'] || @prompt.ask('Dev Token?')
-    pick_operator
+    @operator_id = ENV['OPERATOR_ID'] || @prompt.ask('Operator ID?')
+    @app_token = ENV['APP_TOKEN'] || @prompt.ask('Site Application Token?')
 
-    info "Requesting engagement..."
+    info 'Creating a visitor...'
+    create_visitor
+
+    info 'Requesting an engagement...'
     create_engagement_request
   end
 
-  def pick_operator
-    if ENV['OPERATOR_ID']
-      @operator_id = ENV['OPERATOR_ID']
-      return
-    end
-
-    server = @server == DEV_ENGAGEMENT_API ? DEV_LEGACY_API : @server
-    response = HTTParty.get("https://#{server}/operators?include_offline=false&site_ids[]=#{@site_id}", {
+  def create_visitor
+    response = HTTParty.post("https://#{@api_url}/visitors", {
+      body: {}.to_json,
       headers: {
-        'Authorization' => "Token #{@dev_token}",
-        'Accept' => 'application/vnd.salemove.v1+json'
+        'Authorization' => "ApplicationToken #{@app_token}",
+        'Accept' => 'application/vnd.salemove.v1+json',
+        'Content-Type' => 'application/json',
+        'User-Agent' => USER_AGENT
       }
     })
-    if response.code != 200
-      error "Error fetching site operators: #{response.code} #{response.body}"
-      exit 1
+    if (200..300).cover?(response.code)
+      @visitor_id = response.parsed_response.fetch('id')
+      @access_token = response.parsed_response.fetch('access_token')
+    else
+      error "Error requesting engagement: #{response.code} -- #{response.body}"
     end
-
-    if response['operators'].size == 0
-      error 'No online operators'
-      exit 1
-    end
-
-    @operator_id = response['operators'].first['id']
   end
 
   def create_engagement_request
-    response = HTTParty.post("https://#{@server}/engagement_requests", {
+    @engagement_headers = {
+      'Authorization' => "Bearer #{@access_token}",
+      'Accept' => 'application/vnd.salemove.v1+json',
+      'Content-Type' => 'application/json',
+      'User-Agent' => USER_AGENT
+    }
+
+    response = HTTParty.post("https://#{@engagement_api_url}/engagement_requests", {
       body: {
         media: 'text',
         operator_id: @operator_id,
-        new_site_visitor: {
-          site_id: @site_id,
-          name: 'Demo Visitor'
-        },
+        site_id: @site_id,
+        visitor_id: 'bee543e4-1451-4fdc-af14-77b9920e1c68',
+        source: 'visitor_integrator',
         webhooks: [
           url: @incoming_url,
           method: 'POST',
@@ -79,14 +82,11 @@ class App
             'engagement.chat.message_status'
           ]
         ]
-      },
-      headers: {
-        'Authorization' => "Token #{@dev_token}",
-        'Accept' => 'application/vnd.salemove.v1+json'
-      }
+      }.to_json,
+      headers: @engagement_headers
     })
     if response.code == 201
-      @authentication_headers = response['visitor_authentication']
+      puts 'Engagement request created'
     else
       error "Error requesting engagement: #{response.code} -- #{response.body}"
     end
@@ -98,7 +98,7 @@ class App
       error "Engagement failed: #{payload.inspect}"
       exit 1
     when 'engagement.start'
-      @engagement = Engagement.new(@server, payload['engagement']['id'], @authentication_headers)
+      @engagement = Engagement.new(@engagement_api_url, payload['engagement']['id'], @engagement_headers)
       Gui::Application.start(@engagement)
     when 'engagement.chat.message'
       @engagement.receive_message(payload['message']['content'])

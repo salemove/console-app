@@ -28,9 +28,7 @@ class Engagement
     message_id = SecureRandom.uuid
     response = HTTParty.put(
       "https://#{@server}/engagements/#{@id}/chat_messages/#{message_id}",
-      body: {
-        content: content
-      },
+      body: { content: content }.to_json,
       headers: @headers
     )
     if response.code != 200
